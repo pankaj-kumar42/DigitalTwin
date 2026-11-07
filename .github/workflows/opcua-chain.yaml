@@ -20,7 +20,7 @@ name: OPC UA chain test (without Core Services and MQTT auth)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ throwaway/chain-base ]
     paths:
       - 'semantic-model/opcua/**'
       - 'semantic-model/dataservice/**'
@@ -30,7 +30,7 @@ on:
       - '.env'
       - '.github/workflows/opcua-chain.yaml'
   pull_request:
-    branches: [ main ]
+    branches: [ throwaway/chain-base ]
     paths:
       - 'semantic-model/opcua/**'
       - 'semantic-model/dataservice/**'
