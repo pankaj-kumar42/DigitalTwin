@@ -127,3 +127,4 @@ The bindings deliver a value in the same form as `instances.jsonld` has it:
 Arrays are not supported by the connector yet.
 
 A node without a value and a read which fails do not deliver a value, so the context broker keeps the last known value. When the connection to the server is lost, the connector tries to connect again.
+
