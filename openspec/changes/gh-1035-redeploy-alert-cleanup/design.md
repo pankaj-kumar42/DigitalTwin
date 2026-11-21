@@ -30,7 +30,7 @@ In the filters (`database/backends/postgres/utils.py`), `service=X` matches aler
 - `kafka-consumer-groups.sh --list` in the broker pod lists `debeziumBridgeGroup`, `alertakafkabridge` and the other bridges' groups, but no `flink_json_key_reader2` and no group of the validation's sources.
 - The Flink REST API shows for both jobs: checkpoint counts all 0, checkpoint interval `Long.MAX_VALUE` (disabled), externalization disabled. Every Kafka source vertex of both jobs reports `KafkaSourceReader.commitsSucceeded` 0, `...partition.<n>.committedOffset` -1 and `KafkaConsumer.records-lag-max` `NaN` (0 on the one source with a recent fetch). So the Flink sources commit no offsets without checkpointing, and Kafka has no lag to report for them.
 - The same vertices report `pendingRecords` 0 and `KafkaSourceReader.topic.<topic>.partition.<n>.currentOffset`. For `iff.ngsild.entities` `currentOffset` was 16487 with an end offset of 16488 (`kafka-get-offsets.sh`): it is the offset of the last record read.
-- `kafka-consumer-groups.sh --describe --group debeziumBridgeGroup` reports lag 0 on `iff.ngsild.public.entity`. The same for `alertakafkabridge` reported a constant lag of 116 on `iff.alerts` over several minutes, so its committed offset doesn't tell what reached Alerta (see Open Questions).
+- `kafka-consumer-groups.sh --describe --group debeziumBridgeGroup` reports lag 0 on `iff.ngsild.public.entity`. The same for `alertakafkabridge` reported a committed offset that stayed put while the end offset of `iff.alerts` grew: the bridge commits only every 200 records (D9). `iff.alerts` has one partition.
 - The three validation topics have `retention.ms: 3600000` and no compaction (KafkaTopic config); the broker runs Kafka 3.9.0 and has `kafka-delete-records.sh`.
 - Both connectors' snapshots start and complete within a second of each other in the Connect log, with the markers above, on a small model.
 - The statementset carries `updateStrategy: none` and `table.exec.state.ttl` `3600 s`; neither CronJob is suspended.
@@ -62,7 +62,7 @@ The resync rests on what the review measured: closing the SHACL alerts, emptying
 
 ### D2: The entry point
 
-`make shacl-resync` in `semantic-model/shacl2flink`, with `REPLACE=none` (default), `REPLACE=fresh` or `REPLACE=checkpoint RESTORE_FROM=<path>`, runs a script beside `fuseki_kms.sh`. `CHECKPOINT` is already taken in the Makefile (it enables checkpointing at build time), hence `RESTORE_FROM`. The script works on the deployed statementset `shacl-validation` and needs no KMS. It refuses to start when the statementset doesn't exist, and refuses `REPLACE=checkpoint` before the first step (D5). It prints `step <n>/<total> <name>: started` and `... done`, runs each step under `set -euo pipefail`, and on a failure prints `resync failed in step <n>/<total> <name>: <reason>`, marks the failure (D9) and exits non-zero. If the job was stopped and not started again, the message adds that the SHACL validation doesn't run and that `make shacl-resync REPLACE=fresh` starts it. Every wait has a time limit, overridable by an environment variable. The steps are safe to repeat.
+`make shacl-resync` in `semantic-model/shacl2flink`, with `REPLACE=none` (default), `REPLACE=fresh` or `REPLACE=checkpoint RESTORE_FROM=<path>`, runs a script beside `fuseki_kms.sh`. `CHECKPOINT` is already taken in the Makefile (it enables checkpointing at build time), hence `RESTORE_FROM`. The script works on the deployed statementset `shacl-validation` and needs no KMS. It refuses to start when the statementset doesn't exist, and refuses `REPLACE=checkpoint` before the first step (D5). It prints `step <n>/<total> <name>: started` and `... done`, runs each step under `set -euo pipefail`, and on a failure prints `resync failed in step <n>/<total> <name>: <reason>`, marks the failure (D10) and exits non-zero. If the job was stopped and not started again, the message adds that the SHACL validation doesn't run and that `make shacl-resync REPLACE=fresh` starts it. Every wait has a time limit, overridable by an environment variable. The steps are safe to repeat.
 
 Alerta and the Flink REST API are reached through a port-forward, as `fuseki_kms.sh` reaches Fuseki. The Kafka tools run in the broker pod with a small heap and one at a time, as `tools/ttl_test.py` runs `kafka-get-offsets.sh`, since the broker pod has little memory to spare.
 
@@ -94,7 +94,7 @@ A restore keeps the job's state, so its topics must keep the records since the c
 - the statementset has no field naming a checkpoint or savepoint to start from;
 - the only savepoint path in the operator is the `savepoint` update strategy, which shacl2flink doesn't use, and it passes the location in a form the submit job doesn't read (Context).
 
-The command accepts `REPLACE=checkpoint RESTORE_FROM=<path>` and refuses it before the first step, naming these three gaps. Supporting it needs a statementset field for the path, which the operator passes on as a setting map, retained checkpoints for the validation, and topics that still hold the records since the checkpoint (retention is one hour). That belongs in a follow-up issue for the operator and shacl2flink. Until then, a job that Flink restored by itself, after a failover with checkpointing on, is resynced with `REPLACE=none`.
+The command accepts `REPLACE=checkpoint RESTORE_FROM=<path>` and refuses it before the first step, naming these three gaps. Supporting it needs a statementset field for the path, which the operator passes on as a setting map, retained checkpoints for the validation, and topics that still hold the records since the checkpoint (retention is one hour). That belongs to #1042. Until then, a job that Flink restored by itself, after a failover with checkpointing on, is resynced with `REPLACE=none`.
 
 *Alternatives:*
 - **Leave the option out until it works.** The review asks for one entry point that covers this case; accepting the option fixes the interface now.
@@ -124,7 +124,7 @@ The `kafka-connect-restart` CronJob is not suspended. Right after the step's del
 - **Suspend the CronJob during the resync.** If the resync dies while it is suspended, the refreshes stop, the state TTL passes without one, and the watchdog latches an inconsistency that needs a fresh job. Resuming in a trap doesn't cover a killed shell.
 - **Restart the connectors instead of the pod** (Connect REST, or the KafkaConnector restart annotation). Strimzi's network policy keeps the Connect REST API to the operator (watchdog, check 4). Whether a connector restart takes a complete snapshot with `snapshot.mode: always` has not been checked, while the pod deletion is what `flink-deploy` and the CronJob already do.
 
-### D9: Processed: snapshots completed, then no records left for a quiet period
+### D9: Processed: snapshots completed, no records left for a quiet period, then a marker in Alerta
 
 After every connector completed a snapshot after T0, the step reads the end offset `E` of every partition of every topic the three consumers read: `iff.ngsild.public.entity` (debezium-bridge); `iff.ngsild.entities`, `iff.ngsild.attributes`, `iff.rdf` and the three tables (validation); `iff.alerts.bulk`, `iff.ngsild.attributes` and `iff.ngsild.attributes_insert` (Core Services). The sources are taken from the jobs' vertices, not from a fixed list. It then polls every few seconds. A poll is quiet when:
 - the debezium-bridge's group has lag 0 (it commits; verified);
@@ -132,12 +132,18 @@ After every connector completed a snapshot after T0, the step reads the end offs
 - each source's `currentOffset` is at least `E - 1` on every partition (a partition with `E` 0 needs nothing).
 The step completes when the polls stay quiet for a quiet period, default 30 s, far above the measured latency of the validation (about 1 s) and of Core Services' window (about 3 s). Live traffic doesn't stop it: `pendingRecords` 0 means a consumer keeps up, and `E` is fixed at the end of the snapshot.
 
-Consumer group offsets in Kafka can't serve for the two Flink jobs: without checkpointing their sources commit nothing, and no group of theirs exists in Kafka (verified). `records-lag-max` is `NaN` without a recent fetch. The alerta-bridge's committed offset showed a standing lag while Alerta was current, so it is left out. The e2e test checks what reached Alerta.
+Then the step writes a marker record to `iff.alerts`, behind the records of Core Services, and waits until Alerta has it. The marker is an alert of resource `shacl-validation`, event `ResyncMarker`, service `System`, severity `normal`, with T0 as its value, written with `kafka-console-producer.sh` in the broker pod. The step looks it up with `GET /api/alerts?resource=shacl-validation&event=ResyncMarker` and checks its value. `iff.alerts` has one partition (verified), and the alerta-bridge posts its records one at a time in offset order. `eachMessage` is awaited, `autoCommit` is off, and after a failed post the bridge pauses, throws and gets the same record again (`KafkaBridge/alerta/app.js:69-107`). It only skips a record that Alerta refuses for good (400, 415). So once the marker is in Alerta, every record written before it was posted or refused. With more partitions there would be one marker per partition. The marker arrives closed, as every alert of severity `normal` does, and is not a SHACL alert, so the close step and the scenarios on SHACL alerts don't see it.
+
+Consumer group offsets in Kafka can't serve for the two Flink jobs: without checkpointing their sources commit nothing, and no group of theirs exists in Kafka (verified). `records-lag-max` is `NaN` without a recent fetch.
+
+The alerta-bridge's group can't serve either, and its standing lag is not a backlog. The bridge commits by hand, and only once more than `kafkaCommitThreshold` records are waiting for a commit (`app.js:104-106`; 200, `helm/values.yaml.gotmpl:193`), or on a failed post. There is no time-based commit. It also commits the offset of the last posted record, not the next one. On the local platform the committed offset stayed at 4622 across every reading, while the end offset of `iff.alerts` went from 4738 at the first reading to 4760, then held still through samples every 30 s over five minutes. That is a lag of 116, then 138, always below 200. Over the same time the bridge logged no failed or refused post since it started two days earlier, and it never restarted. A real backlog would show as failed posts, since a post that doesn't fail moves on to the next record within its request timeout (2 s). So the committed offset can stay up to 200 records behind for as long as no 201st record comes, which after a small resync can be hours. The e2e test also checks what reached Alerta.
 
 *Alternatives:*
 - **A fixed wait after the snapshot.** A guess that is too short on a large model and too long on a small one.
-- **A sentinel record through the pipeline.** Needs code in the validation or Core Services.
-- **Consumer group lag for all consumers.** Not available for the Flink jobs, as above.
+- **A sentinel record through the whole pipeline.** Needs code in the validation or Core Services. The marker covers the last hop only, where no code is needed, and the quiet period the hops before it.
+- **Consumer group lag for all consumers.** Not available for the Flink jobs, as above. For the alerta-bridge it would need a commit on a timer or after each post, a change to the bridge that this change leaves out. With such a commit, "committed offset reaches the end offset taken after the quiet period" would do and the marker could go.
+- **Alerta's count of open SHACL alerts stable for a quiet period.** A stalled bridge gives a stable count too, and live raises move it.
+- **No SHACL alert received in Alerta for a quiet period.** Never holds under live traffic, and a stalled bridge passes it as well.
 - **Also require low busy and backpressure times of every vertex.** Possible as an addition if the e2e runs show records still inside the job after the sources are idle. Not taken now, since the quiet period covers the measured latency.
 
 ### D10: The degraded state: the command marks, the watchdog reports
@@ -182,6 +188,7 @@ No other specification covers the deploy targets or the topics; `contracts/*` ar
 - [A fresh job raises from partial data before the snapshot has gone through, so alerts can flap] → That is the degraded state the warning reports; it ends only when processed.
 - [With a fresh job the validation doesn't run between the stop and the start] → Short (a Core Services restart); a failure in between says so and names the command (D2).
 - [Core Services sends the retained attribute window to Scorpio again] → As every Core Services restart; values and `observedAt` are unchanged; in the README.
+- [The marker is one more alert in Alerta, and one more writer of `iff.alerts`] → It is of service `System`, arrives closed and carries the resync's start; the alerta-bridge treats it like any other record.
 - [The quiet period is a heuristic] → Far above the measured latencies, overridable; the e2e test checks the alerts after it.
 - [A raise of a stopped job reaches Alerta after the settle time] → The settle time is far above Core Services' window and overridable.
 - [The command is killed and leaves its marks] → `resync_deadline` makes the watchdog report it critical, naming the step; the next resync replaces the marks.
@@ -193,7 +200,6 @@ Deploy the alerta chart with the new watchdog before the first resync. With the 
 
 ## Open Questions
 
-- Should `flink-deploy` end with a hint, or a check, that a deploy over a running validation needs `make shacl-resync REPLACE=fresh` to clear replayed raises? Or should the resync accept a KMS and deploy it in place of the stop and start?
-- The alerta-bridge's group showed a standing lag on the local platform while Alerta was current. Does the bridge commit only now and then, or is that a fault of its own? Until that is known it stays out of the processed check.
-- The settle time (30 s), the quiet period (30 s) and the time limits are first guesses, to be checked against the e2e runs.
-- The follow-up issue for starting a statementset from a given checkpoint (D5): operator field, retained checkpoints, and the setting format of the savepoint path.
+- The README says that a deploy over a running validation needs `make shacl-resync REPLACE=fresh` to clear replayed raises. Should `flink-deploy` also print that hint, or check for it? Or should the resync accept a KMS and deploy it in place of the stop and start?
+- The settle time (30 s), the quiet period (30 s) and the time limits are first guesses. The e2e runs report the measured times of each step, the snapshot and the marker's way to Alerta, so they can be set on evidence.
+- Should the alerta-bridge commit on a timer, so that its group lag could replace the marker? That is a bridge change for an issue of its own.

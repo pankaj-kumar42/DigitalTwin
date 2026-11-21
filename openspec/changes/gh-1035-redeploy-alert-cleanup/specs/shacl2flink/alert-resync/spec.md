@@ -97,16 +97,21 @@ After the reset step, and after the job started if it was stopped, the resync SH
 - **THEN** the periodic restart of the Connect pods is not suspended at any time, and a snapshot it started after the resync began counts like the resync's own
 
 ### Requirement: Processed
-The resync SHALL take the re-snapshot as processed only when every connector completed a snapshot that started after the resync began, and after that, for a quiet period, the debezium-bridge, the validation job and Core Services have each read every topic they consume up to its end. Only then SHALL it end the degraded state.
+The resync SHALL take the re-snapshot as processed only when every connector completed a snapshot that started after the resync began; after that, for a quiet period, the debezium-bridge, the validation job and Core Services have each read every topic they consume to its end; and then a marker the resync writes to Core Services' output topic, behind its records, has reached Alerta. Only then SHALL it end the degraded state.
 
 #### Scenario: Records left
 - **GIVEN** every connector completed a snapshot after the resync began
 - **WHEN** the validation job or Core Services has not yet read one of its source topics to the end
 - **THEN** the resync keeps waiting and `ValidationConsistency` stays a warning
 
+#### Scenario: A backlog in front of Alerta
+- **GIVEN** the three consumers were quiet for the quiet period, and records of Core Services' output that the alerta-bridge has not yet posted to Alerta
+- **WHEN** the resync waits for its marker
+- **THEN** it keeps waiting and `ValidationConsistency` stays a warning until the marker is in Alerta, and by then every alert written before the marker is in Alerta too
+
 #### Scenario: Quiet
-- **WHEN** every connector completed a snapshot after the resync began, and the three consumers have read their topics to the end throughout the quiet period
-- **THEN** the wait step completes
+- **WHEN** every connector completed a snapshot after the resync began, the three consumers have read their topics to the end throughout the quiet period, and the marker written after it has reached Alerta
+- **THEN** the wait step completes, and the marker is a closed alert of service `System`, not a SHACL alert
 
 ### Requirement: Degraded while the resync runs
 From its first step until the re-snapshot is processed, the resync SHALL keep the platform watchdog's `ValidationConsistency` alert a warning that the SHACL validation is degraded, a resync is in progress and the SHACL alerts are incomplete, naming the current step. The alert SHALL become normal only after the re-snapshot is processed, unless the watchdog keeps an inconsistency.
@@ -131,8 +136,8 @@ When a step fails or does not complete within its time limit, the resync SHALL s
 - **THEN** the resync exits with a non-zero status, its message names the close step, Core Services runs the same job as before, and `ValidationConsistency` is critical, naming the close step
 
 #### Scenario: Not processed in time
-- **WHEN** a consumer still has records left to read when the wait step's time limit has passed
-- **THEN** the resync exits with a non-zero status, names the wait step and the consumer, and `ValidationConsistency` is critical, naming the wait step
+- **WHEN** a consumer still has records left to read, or the marker has not reached Alerta, when the wait step's time limit has passed
+- **THEN** the resync exits with a non-zero status, names the wait step and the consumer or the marker, and `ValidationConsistency` is critical, naming the wait step
 
 #### Scenario: Failed while the job is stopped
 - **WHEN** a resync with a fresh job fails after the job was stopped and before it was started

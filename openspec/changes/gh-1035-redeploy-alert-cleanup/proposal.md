@@ -21,7 +21,7 @@ So this change makes the cleanup a resync with one entry point, whatever happene
   4. restart Core Services without state, so that its alerts filter forwards unchanged raises again;
   5. start the fresh job, if the job was stopped;
   6. trigger a complete Debezium re-snapshot, as `flink-deploy` does, with the periodic Connect restart left running;
-  7. wait until the snapshot is processed: every connector logged a completed snapshot that started after the resync began, and then the debezium-bridge, the validation job and Core Services have read their source topics to the end for a quiet period;
+  7. wait until the snapshot is processed: every connector logged a completed snapshot that started after the resync began, then the debezium-bridge, the validation job and Core Services have read their source topics to the end for a quiet period, and then a marker the command writes behind Core Services' output has reached Alerta through the alerta-bridge;
   8. end the degraded state: `ValidationConsistency` turns normal only now. A failed or timed-out resync leaves it critical, naming the step.
 - The platform watchdog reports a running or failed resync from marks the command keeps in the watchdog's ConfigMap, ahead of its rebuilding, late, unknown and consistent reports. As the repair of an inconsistent state it names `make shacl-resync REPLACE=fresh`, instead of four manual steps that delete the alerts after the redeploy.
 - An end-to-end test on the platform sets up stale, still violated and foreign alerts, runs the resync once without and once with a fresh job, and checks the alerts and the degraded state.
@@ -46,8 +46,8 @@ So this change makes the cleanup a resync with one entry point, whatever happene
 
 ## Impact
 
-- `semantic-model/shacl2flink`: a new `Makefile` target and a script for the steps; a new bats suite run by `test-flink-e2e`; the README describes the command and what an operator loses.
+- `semantic-model/shacl2flink`: a new `Makefile` target and a script for the steps; a new bats suite run by `test-flink-e2e`; the README describes the command, what an operator loses, and that a `flink-deploy` over a running validation needs `make shacl-resync REPLACE=fresh` afterwards.
 - `helm/charts/alerta/templates/platform-watchdog.yaml`: the resync report from the marks, the repair text, and the watchdog leaving the marks alone when it writes its own state; `test/bats-unit/platform-watchdog-alerts.bats` follows.
 - `test/bats-unit`: tests of the step order, the processed check and the failure handling of the script.
 - Operators: alerts that are still violated come back as reopened alerts, and acknowledgements are lost. Core Services restarts, which sends the attribute window it reads from `iff.ngsild.attributes` to Scorpio again, as any Core Services restart does. With a fresh job the validation doesn't run between the stop and the start.
-- No contract between components changes, and no topic is created or deleted. No new dependency: the script uses kubectl, curl, jq and the Kafka tools in the broker pod, like the existing deploy targets and tests.
+- No contract between components changes, and no topic is created or deleted. The command writes one marker record, an alert of service `System`, to `iff.alerts` per resync. No new dependency: the script uses kubectl, curl, jq and the Kafka tools in the broker pod, like the existing deploy targets and tests.
